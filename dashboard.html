@@ -313,8 +313,8 @@ function makeStackedChart(id, labels, datasets, opts={}) {
         dataLabel: { fmt: opts.fmtShort || fmtNumShort }
       },
       scales: {
-        x: { stacked: true, ticks: { callback: function(val) { return horizontal ? (opts.fmtShort||fmtNumShort)(val) : this.getLabelForValue(val); }, font:{size:11} }, grid:{color:'#f0f2f5'} },
-        y: { stacked: true, ticks: { callback: function(val) { return horizontal ? this.getLabelForValue(val) : (opts.fmtShort||fmtNumShort)(val); }, font:{size:11} }, grid:{color:'#f0f2f5'} }
+        x: { stacked: opts.stacked !== false, ticks: { callback: function(val) { return horizontal ? (opts.fmtShort||fmtNumShort)(val) : this.getLabelForValue(val); }, font:{size:11} }, grid:{color:'#f0f2f5'} },
+        y: { stacked: opts.stacked !== false, ticks: { callback: function(val) { return horizontal ? this.getLabelForValue(val) : (opts.fmtShort||fmtNumShort)(val); }, font:{size:11} }, grid:{color:'#f0f2f5'} }
       }
     }
   });
@@ -423,37 +423,41 @@ function rGetFiltered() {
     (!canal || r.ca === canal));
 }
 
-// Média/dia: para cada chave, soma alocações e divide por dias-com-presença daquela chave
+// Média de corretores DISTINTOS por dia: cada corretor conta 1x por dia mesmo aparecendo em manhã+tarde
 function avgPerDay(rows, key) {
-  const byKeyDay = {};
+  const byKeyDay = {}; // { key: { day: Set<corretor> } }
   rows.forEach(r => {
     const k = r[key];
     if (!byKeyDay[k]) byKeyDay[k] = {};
-    byKeyDay[k][r.d] = (byKeyDay[k][r.d] || 0) + 1;
+    if (!byKeyDay[k][r.d]) byKeyDay[k][r.d] = new Set();
+    byKeyDay[k][r.d].add(r.c);
   });
   return Object.entries(byKeyDay).map(([k, days]) => {
     const totalDays = Object.keys(days).length;
-    const total = Object.values(days).reduce((s,v) => s+v, 0);
+    const total = Object.values(days).reduce((s, set) => s + set.size, 0);
     return [k, total / totalDays, total, totalDays];
   }).sort((a,b) => b[1] - a[1]);
 }
 
 function rRenderCards(rows) {
   const corretores = new Set(rows.map(r => r.c)).size;
-  const dias = new Set(rows.map(r => r.d)).size;
-  const total = rows.length;
-  const media = dias ? (total/dias) : 0;
+  // Corretores distintos por dia (manhã+tarde do mesmo corretor = 1)
+  const byDay = {};
+  rows.forEach(r => { if (!byDay[r.d]) byDay[r.d] = new Set(); byDay[r.d].add(r.c); });
+  const dias = Object.keys(byDay).length;
+  const totalDistinct = Object.values(byDay).reduce((s, set) => s + set.size, 0);
+  const media = dias ? (totalDistinct/dias) : 0;
   const html = [
-    {l:'Alocações', v: total.toLocaleString('pt-BR')},
+    {l:'Alocações', v: rows.length.toLocaleString('pt-BR')},
     {l:'Corretores Únicos', v: corretores},
     {l:'Dias com Roleta', v: dias},
-    {l:'Média Total / Dia', v: fmtNum(media)},
+    {l:'Média Corretor/Dia', v: fmtNum(media)},
     {l:'Empreendimentos', v: new Set(rows.map(r => r.e)).size},
   ].map(c => `<div class="card"><div class="label">${c.l}</div><div class="value">${c.v}</div></div>`).join('');
   document.getElementById('r-cards').innerHTML = html;
   const datas = ROLETA.datas;
   document.getElementById('r-subtitle').textContent =
-    `Período: ${fmtDateBR(datas[0])} – ${fmtDateBR(datas[datas.length-1])} · Mostrando ${total.toLocaleString('pt-BR')} de ${ROLETA.totalRows.toLocaleString('pt-BR')} alocações`;
+    `Período: ${fmtDateBR(datas[0])} – ${fmtDateBR(datas[datas.length-1])} · Mostrando ${rows.length.toLocaleString('pt-BR')} de ${ROLETA.totalRows.toLocaleString('pt-BR')} alocações · Corretor conta 1x/dia mesmo em manhã+tarde`;
 }
 
 function rRenderTable(rows) {
@@ -492,49 +496,34 @@ function rRefresh() {
   makeChart('r-chart-ger', 'bar', byGer.map(x=>x[0]), byGer.map(x=>x[1]), 'Média/dia',
     { horizontal: true, fmt: fmtNum, fmtShort: fmtNumShort });
 
-  // Stacked Manhã/Tarde por Empreendimento (média/dia)
+  // Manhã × Tarde por Empreendimento — barras lado a lado (NÃO somar), corretores DISTINTOS/dia em cada período
   const empPer = {};
   rows.forEach(r => {
     if (!empPer[r.e]) empPer[r.e] = { 'MANHÃ': {}, 'TARDE': {} };
     const slot = empPer[r.e][r.p];
-    slot[r.d] = (slot[r.d] || 0) + 1;
+    if (!slot[r.d]) slot[r.d] = new Set();
+    slot[r.d].add(r.c);
   });
   const empLabels = Object.keys(empPer).sort();
   const calcAvg = (slot) => {
     const days = Object.keys(slot).length;
     if (!days) return 0;
-    return Object.values(slot).reduce((s,v)=>s+v,0) / days;
+    return Object.values(slot).reduce((s, set)=> s + set.size, 0) / days;
   };
   const manhaData = empLabels.map(e => calcAvg(empPer[e]['MANHÃ']));
   const tardeData = empLabels.map(e => calcAvg(empPer[e]['TARDE']));
   makeStackedChart('r-chart-per', empLabels, [
     { label: 'Manhã', data: manhaData, backgroundColor: '#2563eb' },
     { label: 'Tarde', data: tardeData, backgroundColor: '#d97706' },
-  ], { horizontal: true, fmt: fmtNum, fmtShort: fmtNumShort });
+  ], { horizontal: true, fmt: fmtNum, fmtShort: fmtNumShort, stacked: false });
 
-  // Linha temporal: total corretores por dia
-  const dayTotals = {};
-  rows.forEach(r => { dayTotals[r.d] = (dayTotals[r.d] || 0) + 1; });
-  const days = Object.keys(dayTotals).sort();
-  makeChart('r-chart-time', 'line', days.map(fmtDateBR), days.map(d => dayTotals[d]), 'Corretores',
+  // Linha temporal: corretores DISTINTOS por dia
+  const dayDistinct = {};
+  rows.forEach(r => { if (!dayDistinct[r.d]) dayDistinct[r.d] = new Set(); dayDistinct[r.d].add(r.c); });
+  const days = Object.keys(dayDistinct).sort();
+  makeChart('r-chart-time', 'line', days.map(fmtDateBR), days.map(d => dayDistinct[d].size), 'Corretores',
     { fmt: v => v + ' corretores', fmtShort: v => Math.round(v) });
 
   // Rankings
   renderRanking('r-rank-ger', byGer.map(x=>[x[0], x[1]]), v => fmtNum(v) + '/dia');
-  renderRanking('r-rank-emp', byEmp.map(x=>[x[0], x[1]]), v => fmtNum(v) + '/dia');
-
-  rRenderTable(rows);
-}
-
-['r-filter-de','r-filter-ate','r-filter-per','r-filter-dir','r-filter-ger','r-filter-emp','r-filter-canal'].forEach(id => document.getElementById(id).addEventListener('change', rRefresh));
-document.getElementById('r-btn-clear').addEventListener('click', () => {
-  ['r-filter-de','r-filter-ate','r-filter-per','r-filter-dir','r-filter-ger','r-filter-emp','r-filter-canal'].forEach(id => document.getElementById(id).value = '');
-  rRefresh();
-});
-
-// Initial render
-pRefresh();
-rRefresh();
-</script>
-</body>
-</html>
+  renderRanking('r-rank-emp'
